@@ -18,7 +18,6 @@ checkConfigFiles() {
   if [ ! -f "docker/api-gateway.env" ]; then echo "Could not find api-gateway environment file. Please run the './server.sh setup' command and try again." && exit 1; fi
   if [ ! -f "docker/auth.env" ]; then echo "Could not find auth environment file. Please run the './server.sh setup' command and try again." && exit 1; fi
   if [ ! -f "docker/files.env" ]; then echo "Could not find file service environment file. Please run the './server.sh setup' command and try again." && exit 1; fi
-  if [ ! -f "docker/workspace.env" ]; then echo "Could not find workspace service environment file. Please run the './server.sh setup' command and try again." && exit 1; fi
 }
 
 checkForConfigFileChanges() {
@@ -42,10 +41,6 @@ compareLineCount() {
   FILES_ENV_FILE_SAMPLE_LINES=$(wc -l docker/files.env.sample | awk '{ print $1 }')
   FILES_ENV_FILE_LINES=$(wc -l docker/files.env | awk '{ print $1 }')
   if [ "$FILES_ENV_FILE_SAMPLE_LINES" -ne "$FILES_ENV_FILE_LINES" ]; then echo "The docker/files.env file contains different amount of lines than docker/files.env.sample. This may be caused by the fact that there is a new environment variable to configure. Please update your environment file and try again." && exit 1; fi
-
-  WORKSPACE_ENV_FILE_SAMPLE_LINES=$(wc -l docker/workspace.env.sample | awk '{ print $1 }')
-  WORKSPACE_ENV_FILE_LINES=$(wc -l docker/workspace.env | awk '{ print $1 }')
-  if [ "$WORKSPACE_ENV_FILE_SAMPLE_LINES" -ne "$WORKSPACE_ENV_FILE_LINES" ]; then echo "The docker/workspace.env file contains different amount of lines than docker/workspace.env.sample. This may be caused by the fact that there is a new environment variable to configure. Please update your environment file and try again." && exit 1; fi
 }
 
 COMMAND=$1 && shift 1
@@ -57,7 +52,13 @@ case "$COMMAND" in
     if [ ! -f "docker/api-gateway.env" ]; then cp docker/api-gateway.env.sample docker/api-gateway.env; fi
     if [ ! -f "docker/auth.env" ]; then cp docker/auth.env.sample docker/auth.env; fi
     if [ ! -f "docker/files.env" ]; then cp docker/files.env.sample docker/files.env; fi
-    if [ ! -f "docker/workspace.env" ]; then cp docker/workspace.env.sample docker/workspace.env; fi
+    sed -i "s/auth_jwt_secret/$(openssl rand -hex 32)/g" .env
+    sed -i "s/changeme123/$(openssl rand -hex 10)/g" .env
+    sed -i "s/change-me-!/$(openssl rand -hex 32)/g" .env
+    sed -i "s/secret/$(openssl rand -hex 32)/g" docker/auth.env
+    sed -i "s/legacy_jwt_secret/$(openssl rand -hex 32)/g" docker/auth.env
+    sed -i "s/secret_key/$(openssl rand -hex 32)/g" docker/auth.env
+    sed -i "s/server_key/$(openssl rand -hex 32)/g" docker/auth.env
     echo "Default configuration files created as .env and docker/*.env files. Feel free to modify values if needed."
     ;;
   'start' )
@@ -75,7 +76,7 @@ case "$COMMAND" in
     ;;
   'update' )
     echo "Stopping all services."
-    $DOCKER_COMPOSE_COMMAND kill --remove-orphans || true
+    $DOCKER_COMPOSE_COMMAND kill || true
     echo "Pulling changes from Git."
     git pull origin $(git rev-parse --abbrev-ref HEAD)
     echo "Checking for env file changes"
@@ -101,12 +102,14 @@ case "$COMMAND" in
     $DOCKER_COMPOSE_COMMAND exec db sh -c "MYSQL_PWD=\$MYSQL_ROOT_PASSWORD mysql \$MYSQL_DATABASE -e \
       'INSERT INTO user_subscriptions SET uuid=UUID(), plan_name=\"PRO_PLAN\", ends_at=8640000000000000, created_at=0, updated_at=0, user_uuid=(SELECT uuid FROM users WHERE email=\"$EMAIL\"), subscription_id=1, subscription_type=\"regular\";' \
     "
-
+    $DOCKER_COMPOSE_COMMAND exec db sh -c "MYSQL_PWD=\$MYSQL_ROOT_PASSWORD mysql \$MYSQL_DATABASE -e \
+      'INSERT INTO subscription_settings SET uuid=UUID(), name=\"FILE_UPLOAD_BYTES_LIMIT\", value=$(docker-compose exec db sh -c "echo \$FILES_QUOTA") , created_at=0, updated_at=0, user_subscription_uuid=(SELECT us.uuid FROM user_subscriptions us INNER JOIN users u ON us.user_uuid=u.uuid WHERE u.email=\"$EMAIL\");' \
+    "
     echo "Subscription successfully created. Please consider donating if you do not plan on purchasing a subscription."
     ;;
   'stop' )
     echo "Stopping all service"
-    $DOCKER_COMPOSE_COMMAND kill --remove-orphans
+    $DOCKER_COMPOSE_COMMAND kill
     echo "Services stopped"
     ;;
   'version' )
@@ -117,9 +120,10 @@ case "$COMMAND" in
     read -p "Continue (y/n)?" choice
     case "$choice" in
       y|Y )
-        $DOCKER_COMPOSE_COMMAND kill --remove-orphans && $DOCKER_COMPOSE_COMMAND rm -fv
+        $DOCKER_COMPOSE_COMMAND kill && $DOCKER_COMPOSE_COMMAND rm -fv
         rm -rf data/mysql
         rm -rf data/redis
+        rm -rf data/uploads/*
         echo "Cleanup performed. You can start your server with a clean environment."
         ;;
       n|N )
